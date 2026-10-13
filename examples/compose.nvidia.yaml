@@ -1,0 +1,15 @@
+# NVIDIA (NVENC / NVDEC) hardware transcoding. Requires the NVIDIA driver and nvidia-container-toolkit on the host.
+#   docker compose -f compose.yaml -f compose.nvidia.yaml up -d
+services:
+  medialab-server:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video, compute, utility]
+    environment:
+      MLW_HW_ACCEL: nvenc
+      MLW_HW_ENCODING: "true"
+      MLW_TONEMAPPING: "true"

@@ -1,0 +1,162 @@
+# Builds the multi-arch image (linux/amd64, linux/arm64) from the medialab apt packages and pushes it to
+# ghcr.io/cristiancasapu/medialab-server.
+#
+# Runs on: a version tag (v12.2-ml.5 -> apt 12.2+ml5+deb12), a manual dispatch, and calls from check-apt.yml.
+# Tags: <upstream>-ml.<n> (12.2-ml.5), the apt version (12.2-ml5-deb12), <upstream> (12.2) and latest.
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      apt_version:
+        description: "apt version of medialab-server (empty = the MLW_VERSION file)"
+        required: false
+        default: ""
+      latest:
+        description: "Also tag 'latest' and the upstream version (e.g. 12.2)"
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      apt_version:
+        type: string
+        required: true
+      latest:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+env:
+  IMAGE: ghcr.io/cristiancasapu/medialab-server
+
+concurrency:
+  group: build-${{ github.ref }}-${{ inputs.apt_version || 'default' }}
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -x rootfs/usr/local/bin/entrypoint rootfs/usr/local/bin/healthcheck examples/docker-run.sh
+      - name: python syntax
+        run: python3 -m py_compile rootfs/usr/lib/medialab-docker/mlw_setup.py
+
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versions and tags
+        id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt="${{ inputs.apt_version }}"
+          if [[ -z "${apt}" && "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # v12.2-ml.5 -> 12.2+ml5+deb12
+            t="${GITHUB_REF#refs/tags/v}"
+            apt="${t%-ml.*}+ml${t##*-ml.}+deb12"
+          fi
+          [[ -n "${apt}" ]] || apt="$(cat MLW_VERSION)"
+          [[ "${apt}" =~ ^([0-9]+\.[0-9]+(\.[0-9]+)?)\+ml([0-9]+)\+deb[0-9]+$ ]] || { echo "unexpected apt version ${apt}"; exit 1; }
+          upstream="${BASH_REMATCH[1]}"; ml="${BASH_REMATCH[3]}"
+          latest="${{ github.event_name == 'push' || inputs.latest }}"
+          tags="${IMAGE}:${upstream}-ml.${ml}"$'\n'"${IMAGE}:${apt//+/-}"
+          if [[ "${latest}" == true ]]; then tags+=$'\n'"${IMAGE}:${upstream}"$'\n'"${IMAGE}:latest"; fi
+          {
+            echo "apt=${apt}"
+            echo "version=${upstream}-ml.${ml}"
+            echo "tags<<EOF"; echo "${tags}"; echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+          echo "apt ${apt} -> ${tags//$'\n'/, }"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: OCI labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ steps.v.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=medialab Server
+            org.opencontainers.image.description=medialab Server (a GPL-2.0 Jellyfin fork) from the signed medialab apt packages, configurable from the environment
+            org.opencontainers.image.vendor=MediaLab Works
+            org.opencontainers.image.url=https://medialab.works
+            org.opencontainers.image.licenses=GPL-2.0-only
+            org.opencontainers.image.version=${{ steps.v.outputs.version }}
+            works.medialab.server.apt-version=${{ steps.v.outputs.apt }}
+          annotations: |
+            org.opencontainers.image.description=medialab Server (a GPL-2.0 Jellyfin fork) from the signed medialab apt packages, configurable from the environment
+            org.opencontainers.image.licenses=GPL-2.0-only
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.v.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            MLW_VERSION=${{ steps.v.outputs.apt }}
+            MLW_IMAGE_REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          pull: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Smoke test (amd64)
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -p 127.0.0.1:8096:8096 -e MLW_PLUGIN_REPOS=none \
+            -e MLW_ADMIN_USER=smoke -e MLW_ADMIN_PASSWORD=smoke-test-only "${IMAGE}:${{ steps.v.outputs.version }}"
+          for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:8096/health && break; sleep 5; done
+          curl -fsS http://127.0.0.1:8096/System/Info/Public
+          curl -fsS -o /dev/null http://127.0.0.1:8096/web/
+          docker logs smoke 2>&1 | grep -E '^\[medialab\]'
+          ! docker logs smoke 2>&1 | grep -q smoke-test-only
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### ${IMAGE}"
+            echo "apt version: \`${{ steps.v.outputs.apt }}\`"
+            echo "digest: \`${{ steps.push.outputs.digest }}\`"
+            echo '```'; echo "${{ steps.v.outputs.tags }}"; echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"

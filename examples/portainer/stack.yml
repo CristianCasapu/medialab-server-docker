@@ -1,0 +1,30 @@
+# Portainer: Stacks -> Add stack -> Web editor (paste this) -> "Environment variables": add the variables below
+# (or "Load variables from .env file" with stack.env). Deploy the stack.
+# Portainer cannot create Docker secrets for standalone stacks, so the password is a stack variable here;
+# after the first start you can remove MLW_ADMIN_PASSWORD (it is only used once, to create the administrator).
+services:
+  medialab-server:
+    image: ghcr.io/cristiancasapu/medialab-server:${MLW_TAG:-latest}
+    container_name: medialab-server
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8096}:8096"
+      - "7359:7359/udp"
+    volumes:
+      - ${CONFIG_DIR:-/srv/medialab/config}:/config
+      - ${CACHE_DIR:-/srv/medialab/cache}:/cache
+      - ${MEDIA_DIR:-/srv/media}:/media:ro
+    # devices:                       # Intel / AMD GPU
+    #   - /dev/dri:/dev/dri
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+      MLW_SERVER_NAME: ${MLW_SERVER_NAME:-medialab}
+      MLW_PUBLISHED_URL: ${MLW_PUBLISHED_URL:-}
+      MLW_KNOWN_PROXIES: ${MLW_KNOWN_PROXIES:-}
+      MLW_HW_ACCEL: ${MLW_HW_ACCEL:-none}
+      MLW_ADMIN_USER: ${MLW_ADMIN_USER:-}
+      MLW_ADMIN_PASSWORD: ${MLW_ADMIN_PASSWORD:-}
+      MLW_PLUGINS: ${MLW_PLUGINS:-}
+      MLW_LICENSE_KEY: ${MLW_LICENSE_KEY:-}

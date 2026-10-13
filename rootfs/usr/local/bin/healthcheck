@@ -1,0 +1,24 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+# Container health check: GET /health on the server's own HTTP port and base URL (read from network.xml),
+# or MLW_HEALTHCHECK_URL when set.
+set -euo pipefail
+
+url="${MLW_HEALTHCHECK_URL:-}"
+if [[ -z "${url}" ]]; then
+    port=8096
+    base=""
+    net="${JELLYFIN_CONFIG_DIR:-/config/config}/network.xml"
+    if [[ -r "${net}" ]]; then
+        p="$(sed -n 's:.*<InternalHttpPort>\([0-9]*\)</InternalHttpPort>.*:\1:p' "${net}" | head -n1)"
+        b="$(sed -n 's:.*<BaseUrl>\([^<]*\)</BaseUrl>.*:\1:p' "${net}" | head -n1)"
+        [[ -n "${p}" ]] && port="${p}"
+        if [[ -n "${b}" ]]; then
+            b="/${b#/}"
+            base="${b%/}"
+        fi
+    fi
+    url="http://127.0.0.1:${port}${base}/health"
+fi
+
+exec curl --silent --show-error --fail --location --max-time 8 --output /dev/null "${url}"

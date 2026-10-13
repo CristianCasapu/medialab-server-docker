@@ -1,0 +1,143 @@
+# medialab Server on Kubernetes (single replica: the server keeps its state in /config).
+#   kubectl create namespace medialab
+#   kubectl -n medialab create secret generic medialab-secrets \
+#     --from-literal=admin-password='a-long-password' --from-literal=license-key='' --from-literal=repo-key=''
+#   kubectl -n medialab apply -f medialab-server.yaml
+# Adjust the storage classes / sizes and the media volume (NFS here) to your cluster.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: medialab-server
+data:
+  TZ: "Europe/Bucharest"
+  PUID: "1000"
+  PGID: "1000"
+  MLW_CONFIG_MODE: "first-run"
+  MLW_SERVER_NAME: "medialab"
+  MLW_PUBLISHED_URL: "https://media.example.org"
+  MLW_KNOWN_PROXIES: "10.42.0.0/16"     # the pod network of your ingress controller
+  MLW_ADMIN_USER: "admin"
+  MLW_PLUGINS: "jf-rosub"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: medialab-config
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: medialab-cache
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: medialab-server
+  labels:
+    app.kubernetes.io/name: medialab-server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # never two servers on the same /config
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: medialab-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: medialab-server
+    spec:
+      containers:
+        - name: medialab-server
+          image: ghcr.io/cristiancasapu/medialab-server:12.2-ml.5
+          ports:
+            - name: http
+              containerPort: 8096
+            - name: discovery
+              containerPort: 7359
+              protocol: UDP
+          envFrom:
+            - configMapRef:
+                name: medialab-server
+          env:
+            # *_FILE variables read Kubernetes secrets mounted as files
+            - name: MLW_ADMIN_PASSWORD_FILE
+              value: /run/secrets/medialab/admin-password
+            - name: MLW_LICENSE_KEY_FILE
+              value: /run/secrets/medialab/license-key
+            - name: MLW_REPO_KEY_FILE
+              value: /run/secrets/medialab/repo-key
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: cache
+              mountPath: /cache
+            - name: media
+              mountPath: /media
+              readOnly: true
+            - name: secrets
+              mountPath: /run/secrets/medialab
+              readOnly: true
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 500m, memory: 1Gi}
+            limits: {memory: 4Gi}
+            # Intel GPU with the Intel device plugin:   gpu.intel.com/i915: "1"
+            # NVIDIA GPU with the NVIDIA device plugin: nvidia.com/gpu: "1"   (and MLW_HW_ACCEL=nvenc)
+      volumes:
+        - name: config
+          persistentVolumeClaim: {claimName: medialab-config}
+        - name: cache
+          persistentVolumeClaim: {claimName: medialab-cache}
+        - name: media
+          nfs: {server: nas.example.org, path: /export/media}
+        - name: secrets
+          secret: {secretName: medialab-secrets}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: medialab-server
+spec:
+  selector:
+    app.kubernetes.io/name: medialab-server
+  ports:
+    - name: http
+      port: 8096
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: medialab-server
+spec:
+  rules:
+    - host: media.example.org
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: medialab-server
+                port: {name: http}
+  # tls: [{hosts: [media.example.org], secretName: media-example-org-tls}]

@@ -1,0 +1,61 @@
+# Daily: if the medialab apt repository has a newer medialab-server than any published image, build it.
+# Mondays: rebuild the newest version anyway (Debian security updates of the base image).
+name: check-apt
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild the newest apt version even if its image exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      apt: ${{ steps.c.outputs.apt }}
+      build: ${{ steps.c.outputs.build }}
+    steps:
+      - name: Newest apt version vs. published images
+        id: c
+        shell: bash
+        run: |
+          set -euo pipefail
+          newest=""
+          for arch in amd64 arm64; do
+            while read -r v; do
+              if [[ -z "${newest}" ]] || dpkg --compare-versions "${v}" gt "${newest}"; then newest="${v}"; fi
+            done < <(curl -fsSL "https://apt.medialab.works/debian/dists/stable/main/binary-${arch}/Packages" \
+                     | awk '/^Package: /{p=$2} /^Version: /{if (p=="medialab-server") print $2}')
+          done
+          [[ -n "${newest}" ]] || { echo "no medialab-server in the repository"; exit 1; }
+          # Both architectures must have it before an image is built.
+          for arch in amd64 arm64; do
+            curl -fsSL "https://apt.medialab.works/debian/dists/stable/main/binary-${arch}/Packages" \
+              | awk -v v="${newest}" '/^Package: /{p=$2} /^Version: /{if (p=="medialab-server" && $2==v) f=1} END{exit !f}' \
+              || { echo "${newest} not yet available for ${arch}"; echo "build=false" >> "${GITHUB_OUTPUT}"; exit 0; }
+          done
+          tag="${newest//+/-}"
+          build=false
+          if ! docker manifest inspect "ghcr.io/cristiancasapu/medialab-server:${tag}" >/dev/null 2>&1; then build=true; fi
+          if [[ "${{ inputs.force }}" == true ]] || [[ "${{ github.event_name }}" == schedule && "$(date -u +%u)" == 1 ]]; then build=true; fi
+          echo "newest ${newest}, image tag ${tag}, build=${build}"
+          { echo "apt=${newest}"; echo "build=${build}"; } >> "${GITHUB_OUTPUT}"
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      apt_version: ${{ needs.check.outputs.apt }}
+      latest: true
+    secrets: inherit

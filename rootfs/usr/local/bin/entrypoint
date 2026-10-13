@@ -1,0 +1,228 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# medialab Server container entrypoint.
+#
+# Runs as root (unless the container was started with --user), then, idempotently and before the server starts:
+#   1. resolves the *_FILE forms of the variables (Docker / Kubernetes secrets) and /run/secrets/mlw_license_key*;
+#   2. sets the time zone, umask and the PUID/PGID of the server user (+ the groups of /dev/dri and /dev/nvidia*);
+#   3. creates /config and /cache and fixes their ownership;
+#   4. writes the server settings from the environment into system.xml / network.xml / encoding.xml;
+#   5. installs the plugins listed in MLW_PLUGINS and merges MLW_PLUGIN_<SLUG>__<Property> into their settings;
+#   6. starts a background job that creates the first administrator through the startup API (MLW_ADMIN_USER);
+#   7. drops privileges and replaces itself with the server (tini stays PID 1, reaps children, forwards signals).
+#
+# Secrets are never printed. Steps 4-6 run as the server user, so every file they write belongs to PUID:PGID.
+
+set -Eeuo pipefail
+
+readonly SETUP=/usr/lib/medialab-docker/mlw_setup.py
+readonly SERVER=/usr/lib/jellyfin/bin/jellyfin
+
+log()  { printf '[medialab] %s\n' "$*"; }
+warn() { printf '[medialab] WARNING: %s\n' "$*" >&2; }
+die()  { printf '[medialab] ERROR: %s\n' "$*" >&2; exit 1; }
+
+is_true() {
+    case "${1,,}" in
+        1 | true | yes | y | on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# 1. Secrets: VAR_FILE=/path -> VAR=<file content> (the _FILE variable itself is kept, as the plugins may read it).
+# ---------------------------------------------------------------------------------------------------------------------
+resolve_file_vars() {
+    local name base path
+    while IFS= read -r name; do
+        base="${name%_FILE}"
+        path="${!name}"
+        [[ -n "${path}" ]] || continue
+        if [[ -n "${!base:-}" ]]; then
+            warn "both ${base} and ${name} are set; using ${base}"
+            continue
+        fi
+        [[ -r "${path}" ]] || die "${name}: cannot read ${path}"
+        # Trailing newlines are removed (secret files usually end with one).
+        printf -v "${base}" '%s' "$(<"${path}")"
+        export "${base?}"
+    done < <(compgen -e | grep -E '^(MLW|JELLYFIN)_[A-Za-z0-9_]*_FILE$' || true)
+}
+
+# /run/secrets/mlw_license_key -> MLW_LICENSE_KEY, /run/secrets/mlw_license_key_jf_rosub -> MLW_LICENSE_KEY_JF_ROSUB
+resolve_secret_dir() {
+    local file name
+    [[ -d /run/secrets ]] || return 0
+    for file in /run/secrets/mlw_license_key /run/secrets/mlw_license_key_*; do
+        [[ -f "${file}" && -r "${file}" ]] || continue
+        name="$(basename "${file}")"
+        name="${name^^}"
+        name="${name//-/_}"
+        [[ "${name}" =~ ^MLW_LICENSE_KEY(_[A-Z0-9_]+)?$ ]] || continue
+        [[ -n "${!name:-}" ]] && continue
+        printf -v "${name}" '%s' "$(<"${file}")"
+        export "${name?}"
+    done
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# 2. User, groups, time zone, umask.
+# ---------------------------------------------------------------------------------------------------------------------
+setup_time_and_umask() {
+    if [[ -n "${TZ:-}" ]]; then
+        if [[ -f "/usr/share/zoneinfo/${TZ}" ]]; then
+            if [[ ${EUID} -eq 0 ]]; then
+                ln -sf "/usr/share/zoneinfo/${TZ}" /etc/localtime
+                printf '%s\n' "${TZ}" > /etc/timezone
+            fi
+        else
+            warn "TZ=${TZ} is not a known time zone; using UTC"
+            export TZ=Etc/UTC
+        fi
+    fi
+    [[ "${UMASK:-022}" =~ ^0?[0-7]{3}$ ]] || die "UMASK must be octal, e.g. 022 or 002"
+    umask "${UMASK:-022}"
+}
+
+# Supplementary groups: owners of the GPU device nodes (VAAPI/QSV/NVIDIA) + MLW_EXTRA_GIDS.
+collect_groups() {
+    local gids=() dev gid
+    for dev in /dev/dri/* /dev/nvidia* /dev/dvb/*/*; do
+        [[ -e "${dev}" ]] || continue
+        gid="$(stat -c '%g' "${dev}")"
+        [[ "${gid}" != 0 ]] && gids+=("${gid}")
+    done
+    if [[ -n "${MLW_EXTRA_GIDS:-}" ]]; then
+        local extra
+        IFS=', ' read -r -a extra <<< "${MLW_EXTRA_GIDS}"
+        for gid in "${extra[@]}"; do
+            [[ "${gid}" =~ ^[0-9]+$ ]] || die "MLW_EXTRA_GIDS: '${gid}' is not a numeric group id"
+            gids+=("${gid}")
+        done
+    fi
+    gids+=("${PGID}")
+    printf '%s\n' "${gids[@]}" | sort -un | paste -sd, -
+}
+
+setup_user() {
+    [[ "${PUID}" =~ ^[0-9]+$ ]] || die "PUID must be a number"
+    [[ "${PGID}" =~ ^[0-9]+$ ]] || die "PGID must be a number"
+    [[ "${PUID}" != 0 ]] || warn "PUID=0: the server runs as root (not recommended)"
+    # The package created the "jellyfin" system user; give it the requested ids (duplicates allowed, -o).
+    if [[ "$(id -g jellyfin)" != "${PGID}" ]]; then
+        groupmod -o -g "${PGID}" jellyfin
+    fi
+    if [[ "$(id -u jellyfin)" != "${PUID}" ]]; then
+        usermod -o -u "${PUID}" jellyfin >/dev/null
+    fi
+    usermod -d /config jellyfin >/dev/null 2>&1 || true
+    GROUPS_CSV="$(collect_groups)"
+}
+
+# Runs a command as the server user (or as is, when the container already runs without root).
+as_user() {
+    if [[ ${EUID} -eq 0 ]]; then
+        setpriv --reuid="${PUID}" --regid="${PGID}" --groups="${GROUPS_CSV}" --inh-caps=-all \
+            env HOME=/config USER=jellyfin "$@"
+    else
+        env HOME="${HOME:-/config}" "$@"
+    fi
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# 3. Directories.
+# ---------------------------------------------------------------------------------------------------------------------
+setup_dirs() {
+    local dir
+    for dir in "${JELLYFIN_DATA_DIR}" "${JELLYFIN_CONFIG_DIR}" "${JELLYFIN_LOG_DIR}" "${JELLYFIN_CACHE_DIR}"; do
+        mkdir -p "${dir}" 2>/dev/null || [[ -d "${dir}" ]] || die "cannot create ${dir}"
+    done
+    [[ ${EUID} -eq 0 ]] || return 0
+    # MLW_CHOWN: auto (default) = fix ownership when the top folder does not belong to PUID:PGID yet;
+    # true = always (recursive); false = never (you manage permissions yourself). /media is never touched.
+    local mode="${MLW_CHOWN:-auto}"
+    for dir in "${JELLYFIN_DATA_DIR}" "${JELLYFIN_CACHE_DIR}"; do
+        case "${mode,,}" in
+            false | no | 0 | never) ;;
+            true | yes | 1 | always) chown -R "${PUID}:${PGID}" "${dir}" ;;
+            *)
+                if [[ "$(stat -c '%u:%g' "${dir}")" != "${PUID}:${PGID}" ]]; then
+                    log "fixing ownership of ${dir} to ${PUID}:${PGID}"
+                    chown -R "${PUID}:${PGID}" "${dir}"
+                fi
+                # The image's mount points are 0777 (for --user); a volume owned by PUID does not need that.
+                if [[ "$(stat -c '%a' "${dir}")" == 777 ]]; then
+                    chmod "$(printf '%o' $((0777 & ~8#${UMASK:-022})))" "${dir}"
+                fi
+                ;;
+        esac
+    done
+    # Paths the server needs outside the volumes.
+    chown "${PUID}:${PGID}" "${JELLYFIN_CONFIG_DIR}" "${JELLYFIN_LOG_DIR}" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------------------------------------------------
+main() {
+    # Anything other than options for the server (e.g. "bash") is run as is.
+    if [[ $# -gt 0 && "$1" != -* ]]; then
+        exec "$@"
+    fi
+
+    resolve_file_vars
+    resolve_secret_dir
+    setup_time_and_umask
+
+    export PUID="${PUID:-1000}" PGID="${PGID:-1000}"
+    GROUPS_CSV=""
+    if [[ ${EUID} -eq 0 ]]; then
+        setup_user
+    else
+        PUID="$(id -u)"
+        PGID="$(id -g)"
+        log "running as uid ${PUID} (--user); PUID/PGID and ownership fixes are skipped"
+    fi
+    setup_dirs
+
+    log "medialab Server $(cat /usr/lib/medialab-docker-version 2>/dev/null || echo '?') - uid ${PUID} gid ${PGID}" \
+        "groups ${GROUPS_CSV:-$(id -G | tr ' ' ,)} - umask $(umask) - TZ ${TZ:-UTC} - config mode ${MLW_CONFIG_MODE:-first-run}"
+
+    # 4. Server settings (a wrong value stops the start: better than a server configured differently than asked).
+    as_user python3 -I "${SETUP}" settings || die "invalid settings (see above)"
+
+    # 5. Plugins and their settings. A failed download does not stop the server unless MLW_PLUGINS_STRICT=true.
+    if [[ -n "${MLW_PLUGINS:-}" ]]; then
+        if ! as_user python3 -I "${SETUP}" plugins; then
+            if is_true "${MLW_PLUGINS_STRICT:-false}"; then
+                die "plugin installation failed and MLW_PLUGINS_STRICT=true"
+            fi
+            warn "some plugins were not installed; the server starts anyway"
+        fi
+    fi
+    as_user python3 -I "${SETUP}" plugin-config || die "invalid plugin settings (see above)"
+
+    # The published URL is read by the server itself (JELLYFIN_PublishedServerUrl).
+    if [[ -n "${MLW_PUBLISHED_URL:-}" ]]; then
+        export JELLYFIN_PublishedServerUrl="${MLW_PUBLISHED_URL}"
+    fi
+
+    # 6. First administrator: a detached job (re-parented to tini) waits for the server and uses the startup API.
+    if [[ -n "${MLW_ADMIN_USER:-}" ]]; then
+        ( as_user python3 -I "${SETUP}" wizard & )
+    fi
+    # Secrets the server process does not need. Licence keys (MLW_LICENSE_KEY*) are kept for the plugins.
+    unset MLW_ADMIN_PASSWORD MLW_ADMIN_PASSWORD_FILE MLW_CERT_PASSWORD MLW_CERT_PASSWORD_FILE MLW_REPO_KEY MLW_REPO_KEY_FILE
+
+    # 7. The server. jemalloc as in the Debian package (lower memory use).
+    local preload=""
+    [[ -e /usr/lib/jellyfin/libjemalloc.so ]] && preload=/usr/lib/jellyfin/libjemalloc.so
+    if [[ ${EUID} -eq 0 ]]; then
+        exec setpriv --reuid="${PUID}" --regid="${PGID}" --groups="${GROUPS_CSV}" --inh-caps=-all \
+            env HOME=/config USER=jellyfin LD_PRELOAD="${preload}" "${SERVER}" "$@"
+    fi
+    exec env LD_PRELOAD="${preload}" "${SERVER}" "$@"
+}
+
+main "$@"

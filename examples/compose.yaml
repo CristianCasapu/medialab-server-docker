@@ -1,0 +1,45 @@
+# medialab Server with Docker Compose.
+#   cp .env.example .env   # then edit .env
+#   mkdir -p secrets && printf '%s' 'a-long-password' > secrets/admin_password
+#   docker compose up -d
+name: medialab
+
+services:
+  medialab-server:
+    image: ghcr.io/cristiancasapu/medialab-server:${MLW_TAG:-latest}
+    container_name: medialab-server
+    restart: unless-stopped
+    ports:
+      - "${MLW_HTTP_PUBLISH:-8096}:8096"
+      - "7359:7359/udp"          # client auto-discovery on the local network (optional)
+    volumes:
+      - ${CONFIG_DIR:-./config}:/config
+      - ${CACHE_DIR:-./cache}:/cache
+      - ${MEDIA_DIR:-./media}:/media:ro
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+      MLW_CONFIG_MODE: ${MLW_CONFIG_MODE:-first-run}
+      MLW_SERVER_NAME: ${MLW_SERVER_NAME:-}
+      MLW_UI_CULTURE: ${MLW_UI_CULTURE:-}
+      MLW_METADATA_LANGUAGE: ${MLW_METADATA_LANGUAGE:-}
+      MLW_METADATA_COUNTRY: ${MLW_METADATA_COUNTRY:-}
+      MLW_PUBLISHED_URL: ${MLW_PUBLISHED_URL:-}
+      MLW_BASE_URL: ${MLW_BASE_URL:-}
+      MLW_KNOWN_PROXIES: ${MLW_KNOWN_PROXIES:-}
+      MLW_REMOTE_ACCESS: ${MLW_REMOTE_ACCESS:-}
+      MLW_ADMIN_USER: ${MLW_ADMIN_USER:-}
+      MLW_ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      MLW_PLUGINS: ${MLW_PLUGINS:-}
+      MLW_PLUGINS_UPDATE: ${MLW_PLUGINS_UPDATE:-false}
+      MLW_REPO_KEY_FILE: ${MLW_REPO_KEY_FILE:-}
+    secrets:
+      - admin_password
+      # - mlw_license_key        # becomes MLW_LICENSE_KEY for the plugins that support it
+
+secrets:
+  admin_password:
+    file: ./secrets/admin_password
+  # mlw_license_key:
+  #   file: ./secrets/mlw_license_key

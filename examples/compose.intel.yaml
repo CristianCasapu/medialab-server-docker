@@ -1,0 +1,13 @@
+# Intel (QSV / VAAPI) or AMD (VAAPI) hardware transcoding. Use together with compose.yaml:
+#   docker compose -f compose.yaml -f compose.intel.yaml up -d
+# The entrypoint adds the server user to the groups that own /dev/dri/* automatically.
+services:
+  medialab-server:
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      MLW_HW_ACCEL: qsv                 # Intel; use "vaapi" for AMD or older Intel GPUs
+      MLW_QSV_DEVICE: /dev/dri/renderD128
+      MLW_VAAPI_DEVICE: /dev/dri/renderD128
+      MLW_HW_ENCODING: "true"
+      MLW_TONEMAPPING: "true"

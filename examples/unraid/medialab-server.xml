@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>medialab-server</Name>
+  <Repository>ghcr.io/cristiancasapu/medialab-server:latest</Repository>
+  <Registry>https://github.com/CristianCasapu/medialab-server-docker/pkgs/container/medialab-server</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/CristianCasapu/medialab-server-docker/issues</Support>
+  <Project>https://medialab.works</Project>
+  <Overview>medialab Server: a GPL-2.0 fork of Jellyfin with the medialab plugin catalog, signed-plugin verification and Live TV fixes. Installed from the signed medialab apt packages. Settings, plugins and the first administrator can be set from the variables below (see the README for the full list).</Overview>
+  <Category>MediaServer:Video MediaServer:Music</Category>
+  <WebUI>http://[IP]:[PORT:8096]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/CristianCasapu/medialab-server-docker/main/examples/unraid/medialab-server.xml</TemplateURL>
+  <Icon>https://medialab.works/icon-512.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <Requires>Intel/AMD GPU: add "--device=/dev/dri" to Extra Parameters and set MLW_HW_ACCEL to qsv or vaapi. For NVIDIA, install the Nvidia-Driver plugin, add "--runtime=nvidia" and set MLW_HW_ACCEL to nvenc.</Requires>
+  <Config Name="WebUI port" Target="8096" Default="8096" Mode="tcp" Description="Web interface and API" Type="Port" Display="always" Required="true" Mask="false">8096</Config>
+  <Config Name="Discovery" Target="7359" Default="7359" Mode="udp" Description="Client auto-discovery on the local network" Type="Port" Display="advanced" Required="false" Mask="false">7359</Config>
+  <Config Name="Config" Target="/config" Default="/mnt/user/appdata/medialab-server" Mode="rw" Description="Settings, database, plugins (back this up)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/medialab-server</Config>
+  <Config Name="Cache" Target="/cache" Default="/mnt/user/appdata/medialab-server/cache" Mode="rw" Description="Image and transcoding cache" Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/medialab-server/cache</Config>
+  <Config Name="Media" Target="/media" Default="/mnt/user/media" Mode="ro" Description="Your media library" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/media</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User id of the server (Unraid: 99 = nobody)" Type="Variable" Display="advanced" Required="true" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group id of the server (Unraid: 100 = users)" Type="Variable" Display="advanced" Required="true" Mask="false">100</Config>
+  <Config Name="UMASK" Target="UMASK" Default="000" Mode="" Description="File creation mask" Type="Variable" Display="advanced" Required="false" Mask="false">000</Config>
+  <Config Name="TZ" Target="TZ" Default="Etc/UTC" Mode="" Description="Time zone, e.g. Europe/Bucharest" Type="Variable" Display="always" Required="false" Mask="false">Etc/UTC</Config>
+  <Config Name="Hardware acceleration" Target="MLW_HW_ACCEL" Default="none|qsv|vaapi|nvenc" Mode="" Description="none, qsv (Intel), vaapi (AMD/Intel), nvenc (NVIDIA)" Type="Variable" Display="always" Required="false" Mask="false">none</Config>
+  <Config Name="NVIDIA devices" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="NVIDIA only: GPU UUID or all" Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+  <Config Name="Published URL" Target="MLW_PUBLISHED_URL" Default="" Mode="" Description="Public address given to clients, e.g. https://media.example.org" Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="Known proxies" Target="MLW_KNOWN_PROXIES" Default="" Mode="" Description="Reverse proxy IPs/subnets, comma separated" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Admin user" Target="MLW_ADMIN_USER" Default="" Mode="" Description="Creates this administrator and skips the setup wizard (new servers only)" Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="Admin password" Target="MLW_ADMIN_PASSWORD" Default="" Mode="" Description="Used once with Admin user; you can clear it after the first start" Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="Plugins" Target="MLW_PLUGINS" Default="" Mode="" Description="medialab plugins to install, e.g. jf-rosub,jf-registration@1.0.2" Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="Repository key" Target="MLW_REPO_KEY" Default="" Mode="" Description="Your medialab.works repository key (jfr_...), for licensed plugin versions" Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Licence key" Target="MLW_LICENSE_KEY" Default="" Mode="" Description="Passed to the plugins that support reading it from the environment" Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Config mode" Target="MLW_CONFIG_MODE" Default="first-run|enforce" Mode="" Description="first-run: write settings on new servers and when a value changes; enforce: at every start" Type="Variable" Display="advanced" Required="false" Mask="false">first-run</Config>
+</Container>
