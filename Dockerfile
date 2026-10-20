@@ -16,6 +16,10 @@ FROM debian:${DEBIAN_TAG}
 
 # apt version of medialab-server and medialab-server-web ("latest" = newest in the repository).
 ARG MLW_VERSION=12.2+ml5+deb12
+# apt version of medialab-server-web. Empty = the same version as medialab-server or, when a release only rebuilt the
+# server (no web package with that exact version), the newest web package of the same upstream version that is not
+# newer than the server (e.g. server 12.2+ml10+deb12 -> web 12.2+ml9+deb12).
+ARG MLW_WEB_VERSION=
 # apt version of jellyfin-ffmpeg8 ("latest" = newest in the repository).
 ARG FFMPEG_VERSION=latest
 ARG MLW_APT_URL=https://apt.medialab.works/debian
@@ -49,11 +53,22 @@ RUN set -eux; \
     apt-get update; \
     # 3. The packages (pinned versions unless "latest").
     pin() { if [ "$2" = latest ]; then echo "$1"; else echo "$1=$2"; fi; }; \
+    web="${MLW_WEB_VERSION}"; \
+    if [ -z "${web}" ] && [ "${MLW_VERSION}" = latest ]; then web=latest; fi; \
+    if [ -z "${web}" ]; then \
+        for v in $(apt-cache madison medialab-server-web | awk '{print $3}'); do \
+            case "${v}" in "${MLW_VERSION%%+*}+"*) ;; *) continue ;; esac; \
+            dpkg --compare-versions "${v}" le "${MLW_VERSION}" || continue; \
+            if [ -z "${web}" ] || dpkg --compare-versions "${v}" gt "${web}"; then web="${v}"; fi; \
+        done; \
+        test -n "${web}"; \
+    fi; \
+    echo "medialab-server ${MLW_VERSION}, medialab-server-web ${web}"; \
     extra=(); \
     if [ "${TARGETARCH:-$(dpkg --print-architecture)}" = amd64 ] && [ "${INTEL_OPENCL}" = true ]; then extra+=(intel-opencl-icd); fi; \
     apt-get install -y --no-install-recommends \
         "$(pin medialab-server "${MLW_VERSION}")" \
-        "$(pin medialab-server-web "${MLW_VERSION}")" \
+        "$(pin medialab-server-web "${web}")" \
         "$(pin jellyfin-ffmpeg8 "${FFMPEG_VERSION}")" \
         medialab-repo \
         tini tzdata util-linux libfontconfig1 fonts-dejavu-core \

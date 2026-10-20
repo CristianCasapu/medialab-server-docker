@@ -1,5 +1,8 @@
 # Daily: if the medialab apt repository has a newer medialab-server than any published image, build it.
 # Mondays: rebuild the newest version anyway (Debian security updates of the base image).
+# Only the upstream series in LATEST_SERIES is built automatically (it gets the <upstream> and latest tags); a newer
+# series in the repository (e.g. 13.0) is only reported: moving latest to it is a manual decision (change
+# LATEST_SERIES, or run build.yml by hand).
 name: check-apt
 
 on:
@@ -11,6 +14,9 @@ on:
         description: "Rebuild the newest apt version even if its image exists"
         type: boolean
         default: false
+
+env:
+  LATEST_SERIES: "12.2"
 
 permissions:
   contents: read
@@ -30,14 +36,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          newest=""
+          newest=""; other=""
           for arch in amd64 arm64; do
             while read -r v; do
+              if [[ "${v}" != "${LATEST_SERIES}+"* ]]; then
+                if dpkg --compare-versions "${v}" gt "${LATEST_SERIES}+~"; then other="${v}"; fi
+                continue
+              fi
               if [[ -z "${newest}" ]] || dpkg --compare-versions "${v}" gt "${newest}"; then newest="${v}"; fi
             done < <(curl -fsSL "https://apt.medialab.works/debian/dists/stable/main/binary-${arch}/Packages" \
                      | awk '/^Package: /{p=$2} /^Version: /{if (p=="medialab-server") print $2}')
           done
-          [[ -n "${newest}" ]] || { echo "no medialab-server in the repository"; exit 1; }
+          if [[ -n "${other}" ]]; then
+            echo "::notice::medialab-server ${other} (a newer series than ${LATEST_SERIES}) is in the repository; not built automatically"
+          fi
+          [[ -n "${newest}" ]] || { echo "no medialab-server ${LATEST_SERIES} in the repository"; exit 1; }
           # Both architectures must have it before an image is built.
           for arch in amd64 arm64; do
             curl -fsSL "https://apt.medialab.works/debian/dists/stable/main/binary-${arch}/Packages" \
